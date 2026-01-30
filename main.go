@@ -7,21 +7,31 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
+
+	pokecache "github.com/kerkox/pokedex-cli-go/internal"
 )
 
 type cliCommand struct {
-	name		string
-	description	string
+	name        string
+	description string
 	callback    func(config *Config) error
 }
 
 type Config struct {
-	Next string `json:"next"`
+	Next     string `json:"next"`
 	Previous string `json:"previous"`
+}
+
+type CachedResponse struct {
+	Next     string                   `json:"next"`
+	Previous string                   `json:"previous"`
+	Results  []map[string]interface{} `json:"results"`
 }
 
 func commandExit(config *Config) error {
 	fmt.Println("Closing the Pokedex... Goodbye!")
+	cache.Stop()
 	return nil
 } 
 
@@ -41,91 +51,134 @@ func commandMapBack(config *Config) error {
 		fmt.Printf("you're on the first page\n")
 		return nil
 	}
-	res, err := http.Get(PokedexApiURL)	
+
+	if cachedData, found := cache.Get(PokedexApiURL); found {
+		fmt.Println("Using cached previous map data:")
+		var cached CachedResponse
+		err := json.Unmarshal(cachedData, &cached)
+		if err != nil {
+			fmt.Printf("Error decoding cached previous map data: %v\n", err)
+			return err
+		}
+		// ✅ Actualizar config desde cache
+		config.Next = cached.Next
+		config.Previous = cached.Previous
+		
+		for _, item := range cached.Results {
+			if name, ok := item["name"].(string); ok {
+				fmt.Printf("%s\n", name)
+			}
+		}
+		return nil
+	}
+
+
+	res, err := http.Get(PokedexApiURL)
 	if err != nil {
 		fmt.Printf("Error fetching previous map data: %v\n", err)
 		return err
 	}
-
 	defer res.Body.Close()
-	decoder := json.NewDecoder(res.Body)
-	
+
 	if res.StatusCode > 299 {
 		fmt.Printf("Error: received status code %d\n", res.StatusCode)
 		return fmt.Errorf("received status code %d", res.StatusCode)
 	}
-	var result map[string]interface{}
-	err = decoder.Decode(&result)
+
+	var cached CachedResponse
+	err = json.NewDecoder(res.Body).Decode(&cached)
 	if err != nil && err != io.EOF {
-		fmt.Printf("Error decoding previous map data: %v\n", err)	
+		fmt.Printf("Error decoding previous map data: %v\n", err)
 		return err
 	}
-	
-	if next, ok := result["next"].(string); ok {
-		config.Next = next
+
+	// Actualizar config
+	config.Next = cached.Next
+	config.Previous = cached.Previous
+
+	// Cachear respuesta completa con navegación
+	data, err := json.Marshal(cached)
+	if err != nil {
+		fmt.Printf("Error marshaling for cache: %v\n", err)
 	} else {
-		config.Next = ""
+		cache.Add(PokedexApiURL, data)
 	}
-	
-	if previous, ok := result["previous"].(string); ok {
-		config.Previous = previous
-	} else {
-		config.Previous = ""
+
+	for _, item := range cached.Results {
+		if name, ok := item["name"].(string); ok {
+			fmt.Printf("%s\n", name)
+		}
 	}
-	
-	for _, value := range result["results"].([]interface{}) {
-		item := value.(map[string]interface{})
-		fmt.Printf("%s\n", item["name"])
-	}
-	// Placeholder for actual map display logic
 	return nil
 }
 
 func commandMap(config *Config) error {
-
 	PokedexApiURL := config.Next
 	if PokedexApiURL == "" {
 		fmt.Printf("No more map data to fetch.\n")
+		return nil
 	}
+
+	if cachedData, found := cache.Get(PokedexApiURL); found {
+		fmt.Println("Using cached map data:")
+		var cached CachedResponse
+		err := json.Unmarshal(cachedData, &cached)
+		if err != nil {
+			fmt.Printf("Error decoding cached map data: %v\n", err)
+			return err
+		}
+		// ✅ Actualizar config desde cache
+		config.Next = cached.Next
+		config.Previous = cached.Previous
+
+		for _, item := range cached.Results {
+			if name, ok := item["name"].(string); ok {
+				fmt.Printf("%s\n", name)
+			}
+		}
+		return nil
+	}
+
+
+
 	fmt.Printf("Fetching map data from %s\n", PokedexApiURL)
-	res, err := http.Get(PokedexApiURL)	
+	res, err := http.Get(PokedexApiURL)
 	if err != nil {
 		fmt.Printf("Error fetching map data: %v\n", err)
 		return err
 	}
-
 	defer res.Body.Close()
-	decoder := json.NewDecoder(res.Body)
-	
+
 	if res.StatusCode > 299 {
 		fmt.Printf("Error: received status code %d\n", res.StatusCode)
 		return fmt.Errorf("received status code %d", res.StatusCode)
 	}
-	var result map[string]interface{}
-	err = decoder.Decode(&result)
+
+	var cached CachedResponse
+	err = json.NewDecoder(res.Body).Decode(&cached)
 	if err != nil && err != io.EOF {
-		fmt.Printf("Error decoding map data: %v\n", err)	
+		fmt.Printf("Error decoding map data: %v\n", err)
 		return err
 	}
-	
-	if next, ok := result["next"].(string); ok {
-		config.Next = next
+
+	// Actualizar config
+	config.Next = cached.Next
+	config.Previous = cached.Previous
+
+	// Cachear respuesta completa con navegación
+	data, err := json.Marshal(cached)
+	if err != nil {
+		fmt.Printf("Error marshaling for cache: %v\n", err)
 	} else {
-		config.Next = ""
+		cache.Add(PokedexApiURL, data)
 	}
-	
-	if previous, ok := result["previous"].(string); ok {
-		config.Previous = previous
-	} else {
-		config.Previous = ""
-	}
-	
+
 	fmt.Println("Map Data:")
-	for _, value := range result["results"].([]interface{}) {
-		item := value.(map[string]interface{})
-		fmt.Printf("%s\n", item["name"])
+	for _, item := range cached.Results {
+		if name, ok := item["name"].(string); ok {
+			fmt.Printf("%s\n", name)
+		}
 	}
-	// Placeholder for actual map display logic
 	return nil
 }
 
@@ -134,6 +187,8 @@ var POKEDEX_API_URL = os.Getenv("POKEDEX_API_URL")
 
 
 var config Config
+var cacheDuration = 10 // seconds
+var cache = pokecache.NewCache(time.Duration(cacheDuration) * time.Second)
 
 func init() {
 	if POKEDEX_API_URL == "" {
@@ -196,8 +251,6 @@ func main() {
 		}
 		// fmt.Printf("Your command was: %s", parts[0])
 	}
-
-
 	// fmt.Printf("%q",cleanInput("   hello  world "))
 }
 
