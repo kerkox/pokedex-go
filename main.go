@@ -15,8 +15,10 @@ import (
 type cliCommand struct {
 	name        string
 	description string
-	callback    func(config *Config) error
+	callback    func(config *Config, params []string) error
 }
+
+const LOCATION_AREA_ENDPOINT = "location-area/"
 
 type Config struct {
 	Next     string `json:"next"`
@@ -29,13 +31,27 @@ type CachedResponse struct {
 	Results  []map[string]interface{} `json:"results"`
 }
 
-func commandExit(config *Config) error {
+// LocationAreaResponse - Estructura específica para el endpoint location-area/{name}
+// Solo definimos los campos que necesitamos (Interface Segregation Principle)
+type LocationAreaResponse struct {
+	PokemonEncounters []PokemonEncounter `json:"pokemon_encounters"`
+}
+
+type PokemonEncounter struct {
+	Pokemon Pokemon `json:"pokemon"`
+}
+
+type Pokemon struct {
+	Name string `json:"name"`
+}
+
+func commandExit(config *Config, params []string) error {
 	fmt.Println("Closing the Pokedex... Goodbye!")
 	cache.Stop()
 	return nil
 } 
 
-func commandHelp(config *Config) error {
+func commandHelp(config *Config, params []string) error {
 	fmt.Println("Welcome to the Pokedex!")
 	fmt.Println("Usage:")
 
@@ -45,7 +61,7 @@ func commandHelp(config *Config) error {
 	return nil
 }
 
-func commandMapBack(config *Config) error {
+func commandMapBack(config *Config, params []string) error {
 	PokedexApiURL := config.Previous
 	if PokedexApiURL == "" {
 		fmt.Printf("you're on the first page\n")
@@ -112,7 +128,7 @@ func commandMapBack(config *Config) error {
 	return nil
 }
 
-func commandMap(config *Config) error {
+func commandMap(config *Config, params []string) error {
 	PokedexApiURL := config.Next
 	if PokedexApiURL == "" {
 		fmt.Printf("No more map data to fetch.\n")
@@ -182,6 +198,74 @@ func commandMap(config *Config) error {
 	return nil
 }
 
+func commandExplore(config *Config, params []string) error {
+	// Validación de parámetros
+	if len(params) == 0 || params[0] == "" {
+		fmt.Println("Please provide a location to explore.")
+		return nil
+	}
+	location := params[0]
+
+	PokedexApiURLLocationArea := POKEDEX_API_URL + LOCATION_AREA_ENDPOINT + location + "/"
+	fmt.Printf("Exploring %s...\n", location)
+
+	// Intentar obtener del cache primero
+	if cachedData, found := cache.Get(PokedexApiURLLocationArea); found {
+		fmt.Println("Using cached data:")
+		var locationResp LocationAreaResponse
+		if err := json.Unmarshal(cachedData, &locationResp); err != nil {
+			fmt.Printf("Error decoding cached data: %v\n", err)
+			return err
+		}
+		printPokemonEncounters(locationResp)
+		return nil
+	}
+
+	// Hacer la petición HTTP
+	fmt.Printf("Fetching data from %s\n", PokedexApiURLLocationArea)
+	res, err := http.Get(PokedexApiURLLocationArea)
+	if err != nil {
+		fmt.Printf("Error fetching data: %v\n", err)
+		return err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode > 299 {
+		fmt.Printf("Error: received status code %d\n", res.StatusCode)
+		return fmt.Errorf("received status code %d", res.StatusCode)
+	}
+
+	// Leer el body completo para poder cachearlo
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		fmt.Printf("Error reading response body: %v\n", err)
+		return err
+	}
+
+	// Deserializar a nuestra estructura específica
+	var locationResp LocationAreaResponse
+	if err := json.Unmarshal(body, &locationResp); err != nil {
+		fmt.Printf("Error decoding response: %v\n", err)
+		return err
+	}
+
+	// Cachear los bytes crudos (más eficiente y reutilizable)
+	cache.Add(PokedexApiURLLocationArea, body)
+
+	// Imprimir los nombres de los pokemon
+	fmt.Println("Found Pokemon:")
+	printPokemonEncounters(locationResp)
+
+	return nil
+}
+
+// printPokemonEncounters - Helper function siguiendo DRY principle
+func printPokemonEncounters(resp LocationAreaResponse) {
+	for _, encounter := range resp.PokemonEncounters {
+		fmt.Printf(" - %s\n", encounter.Pokemon.Name)
+	}
+}
+
 var registry map[string]cliCommand
 var POKEDEX_API_URL = os.Getenv("POKEDEX_API_URL")
 
@@ -192,10 +276,10 @@ var cache = pokecache.NewCache(time.Duration(cacheDuration) * time.Second)
 
 func init() {
 	if POKEDEX_API_URL == "" {
-		POKEDEX_API_URL = "https://pokeapi.co/api/v2/location-area/?offset=0&limit=20"
+		POKEDEX_API_URL = "https://pokeapi.co/api/v2/"
 	}
 	config = Config{
-		Next: POKEDEX_API_URL,
+		Next: POKEDEX_API_URL+LOCATION_AREA_ENDPOINT+"?offset=0&limit=20",
 		Previous: "",
 	}
 	registry = map[string]cliCommand{
@@ -219,6 +303,11 @@ func init() {
 			description: "Display the previous map",
 			callback:    commandMapBack,
 		},
+		"explore": {
+			name:        "explore",
+			description: "Explore the Pokedex (alias for map)",
+			callback:    commandExplore,
+		},
 	}
 }
 
@@ -239,7 +328,7 @@ func main() {
 		}
 		commandName := parts[0]
 		if command, exists := registry[commandName]; exists {
-			err := command.callback(&config)
+			err := command.callback(&config, parts[1:])
 			if err != nil {
 				fmt.Printf("Error executing command '%s': %v\n", commandName, err)
 			}
