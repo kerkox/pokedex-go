@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"time"
@@ -19,6 +20,8 @@ type cliCommand struct {
 }
 
 const LOCATION_AREA_ENDPOINT = "location-area/"
+const POKEMON_ENDPOINT = "pokemon/"
+var pokemonsCaught = map[string]Pokemon{}
 
 type Config struct {
 	Next     string `json:"next"`
@@ -31,8 +34,8 @@ type CachedResponse struct {
 	Results  []map[string]interface{} `json:"results"`
 }
 
-// LocationAreaResponse - Estructura específica para el endpoint location-area/{name}
-// Solo definimos los campos que necesitamos (Interface Segregation Principle)
+// LocationAreaResponse - Specific structure for the location-area/{name} endpoint
+// We only define the fields we need (Interface Segregation Principle)
 type LocationAreaResponse struct {
 	PokemonEncounters []PokemonEncounter `json:"pokemon_encounters"`
 }
@@ -41,8 +44,14 @@ type PokemonEncounter struct {
 	Pokemon Pokemon `json:"pokemon"`
 }
 
+// Pokemon represents both the API response and the domain model.
+// In Go, when the structure is identical, there's no need to create separate types.
+// If in the future you need additional domain fields (e.g., DateCaught),
+// you can create a CaughtPokemon type that embeds Pokemon.
 type Pokemon struct {
-	Name string `json:"name"`
+	ID             int    `json:"id"`
+	Name           string `json:"name"`
+	BaseExperience int    `json:"base_experience"`
 }
 
 func commandExit(config *Config, params []string) error {
@@ -76,7 +85,7 @@ func commandMapBack(config *Config, params []string) error {
 			fmt.Printf("Error decoding cached previous map data: %v\n", err)
 			return err
 		}
-		// ✅ Actualizar config desde cache
+		// ✅ Update config from cache
 		config.Next = cached.Next
 		config.Previous = cached.Previous
 		
@@ -108,11 +117,11 @@ func commandMapBack(config *Config, params []string) error {
 		return err
 	}
 
-	// Actualizar config
+	// Update config
 	config.Next = cached.Next
 	config.Previous = cached.Previous
 
-	// Cachear respuesta completa con navegación
+	// Cache complete response with navigation
 	data, err := json.Marshal(cached)
 	if err != nil {
 		fmt.Printf("Error marshaling for cache: %v\n", err)
@@ -143,7 +152,7 @@ func commandMap(config *Config, params []string) error {
 			fmt.Printf("Error decoding cached map data: %v\n", err)
 			return err
 		}
-		// ✅ Actualizar config desde cache
+		// ✅ Update config from cache
 		config.Next = cached.Next
 		config.Previous = cached.Previous
 
@@ -177,11 +186,11 @@ func commandMap(config *Config, params []string) error {
 		return err
 	}
 
-	// Actualizar config
+	// Update config
 	config.Next = cached.Next
 	config.Previous = cached.Previous
 
-	// Cachear respuesta completa con navegación
+	// Cache complete response with navigation
 	data, err := json.Marshal(cached)
 	if err != nil {
 		fmt.Printf("Error marshaling for cache: %v\n", err)
@@ -199,7 +208,7 @@ func commandMap(config *Config, params []string) error {
 }
 
 func commandExplore(config *Config, params []string) error {
-	// Validación de parámetros
+	// Parameter validation
 	if len(params) == 0 || params[0] == "" {
 		fmt.Println("Please provide a location to explore.")
 		return nil
@@ -209,7 +218,7 @@ func commandExplore(config *Config, params []string) error {
 	PokedexApiURLLocationArea := POKEDEX_API_URL + LOCATION_AREA_ENDPOINT + location + "/"
 	fmt.Printf("Exploring %s...\n", location)
 
-	// Intentar obtener del cache primero
+	// Try to get from cache first
 	if cachedData, found := cache.Get(PokedexApiURLLocationArea); found {
 		fmt.Println("Using cached data:")
 		var locationResp LocationAreaResponse
@@ -221,7 +230,7 @@ func commandExplore(config *Config, params []string) error {
 		return nil
 	}
 
-	// Hacer la petición HTTP
+	// Make HTTP request
 	fmt.Printf("Fetching data from %s\n", PokedexApiURLLocationArea)
 	res, err := http.Get(PokedexApiURLLocationArea)
 	if err != nil {
@@ -235,28 +244,138 @@ func commandExplore(config *Config, params []string) error {
 		return fmt.Errorf("received status code %d", res.StatusCode)
 	}
 
-	// Leer el body completo para poder cachearlo
+	// Read full body to cache it
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		fmt.Printf("Error reading response body: %v\n", err)
 		return err
 	}
 
-	// Deserializar a nuestra estructura específica
+	// Deserialize to our specific structure
 	var locationResp LocationAreaResponse
 	if err := json.Unmarshal(body, &locationResp); err != nil {
 		fmt.Printf("Error decoding response: %v\n", err)
 		return err
 	}
 
-	// Cachear los bytes crudos (más eficiente y reutilizable)
+	// Cache raw bytes (more efficient and reusable)
 	cache.Add(PokedexApiURLLocationArea, body)
 
-	// Imprimir los nombres de los pokemon
+	// Print pokemon names
 	fmt.Println("Found Pokemon:")
 	printPokemonEncounters(locationResp)
 
 	return nil
+}
+
+// getPokemonFromCache attempts to get a Pokemon from cache.
+// Returns nil, nil if not in cache (not an error).
+// Follows SRP: only responsible for getting data from cache.
+func getPokemonFromCache(url string) (*Pokemon, error) {
+	cachedData, found := cache.Get(url)
+	if !found {
+		return nil, nil
+	}
+	
+	var pokemon Pokemon
+	if err := json.Unmarshal(cachedData, &pokemon); err != nil {
+		return nil, fmt.Errorf("error decoding cached Pokemon: %w", err)
+	}
+	return &pokemon, nil
+}
+
+// ErrPokemonNotFound indicates that the Pokemon doesn't exist in the API
+var ErrPokemonNotFound = fmt.Errorf("pokemon not found")
+
+// fetchPokemonFromAPI fetches a Pokemon from the API and caches it.
+// Returns ErrPokemonNotFound if the Pokemon doesn't exist.
+// Follows SRP: only responsible for fetch + cache.
+func fetchPokemonFromAPI(url string) (*Pokemon, error) {
+	res, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching Pokemon: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode == http.StatusNotFound {
+		return nil, ErrPokemonNotFound
+	}
+	if res.StatusCode > 299 {
+		return nil, fmt.Errorf("API error: status code %d", res.StatusCode)
+	}
+
+	// Read full body to cache it
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response: %w", err)
+	}
+
+	var pokemon Pokemon
+	if err := json.Unmarshal(body, &pokemon); err != nil {
+		return nil, fmt.Errorf("error decoding Pokemon: %w", err)
+	}
+
+	// Cache raw bytes
+	cache.Add(url, body)
+
+	return &pokemon, nil
+}
+
+
+// GetPokemon fetches a Pokemon, first from cache, then from the API.
+// This is the public function that orchestrates data retrieval.
+func GetPokemon(pokemonName string) (*Pokemon, error) {
+	url := POKEDEX_API_URL + POKEMON_ENDPOINT + pokemonName + "/"
+
+	// Try cache first
+	if pokemon, err := getPokemonFromCache(url); err != nil {
+		return nil, err
+	} else if pokemon != nil {
+		return pokemon, nil
+	}
+
+	// Cache miss - fetch from API
+	return fetchPokemonFromAPI(url)
+}
+
+func commandCatch(config *Config, params []string) error {
+	// Parameter validation
+	if len(params) == 0 || params[0] == "" {
+		fmt.Println("Please specify a Pokemon to catch.")
+		return nil
+	}
+	pokemonName := params[0]
+
+	fmt.Printf("Throwing a Pokeball at %s...\n", pokemonName)
+
+	pokemon, err := GetPokemon(pokemonName)
+	if err != nil {
+		if err == ErrPokemonNotFound {
+			fmt.Printf("Pokemon %s not found!\n", pokemonName)
+			return nil
+		}
+		return err
+	}
+
+	// Centralized catch logic
+	if attemptCatch(pokemon) {
+		fmt.Printf("%s was caught!\n", pokemonName)
+		pokemonsCaught[pokemonName] = *pokemon
+	} else {
+		fmt.Printf("%s escaped!\n", pokemonName)
+	}
+	return nil
+}
+
+// attemptCatch determines if a Pokemon was caught.
+// Catch probability is inversely proportional to BaseExperience.
+// Pokemon with higher experience are harder to catch.
+func attemptCatch(pokemon *Pokemon) bool {
+	// Avoid division by zero
+	if pokemon.BaseExperience <= 0 {
+		return true
+	}
+	return rand.Intn(pokemon.BaseExperience) == 0
 }
 
 // printPokemonEncounters - Helper function siguiendo DRY principle
@@ -307,6 +426,11 @@ func init() {
 			name:        "explore",
 			description: "Explore the Pokedex (alias for map)",
 			callback:    commandExplore,
+		},
+		"catch": {
+			name:        "catch",
+			description: "Catch a Pokemon (not implemented yet)",
+			callback:    commandCatch,
 		},
 	}
 }
